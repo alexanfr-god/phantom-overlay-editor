@@ -1,0 +1,20 @@
+{
+  "name": "phantom-overlay-editor",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently --names \"SERVER,DESKTOP,EXT,AGENT\" --prefix-colors \"cyan,magenta,yellow,green\" \"npm run dev --workspace=packages/sync-server\" \"npm run dev --workspace=packages/desktop\" \"npm run dev --workspace=packages/extension\" \"npm run dev --workspace=packages/agent\"",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=packages/sync-server && npm run build --workspace=packages/desktop && npm run build --workspace=packages/extension && npm run build --workspace=packages/agent",
+    "dev:server": "npm run dev --workspace=packages/sync-server",
+    "dev:desktop": "npm run dev --workspace=packages/desktop",
+    "dev:ext": "npm run dev --workspace=packages/extension",
+    "dev:agent": "npm run dev --workspace=packages/agent"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.4.5"
+  }
+}

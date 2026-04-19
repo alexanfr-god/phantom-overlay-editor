@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Phantom Overlay Editor",
+  "version": "0.1.0",
+  "description": "Injects visual overlay onto Phantom wallet UI",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "chrome-extension://bfnaelmomeimhlpmgjnjophhpkkoljpa/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["chrome-extension://bfnaelmomeimhlpmgjnjophhpkkoljpa/*"],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["chrome-extension://bfnaelmomeimhlpmgjnjophhpkkoljpa/*"]
+    }
+  ]
+}

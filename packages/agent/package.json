@@ -1,0 +1,27 @@
+{
+  "name": "@phantom-editor/agent",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview"
+  },
+  "dependencies": {
+    "@phantom-editor/shared": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.10",
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "^27.3.11",
+    "electron-vite": "^1.0.29",
+    "typescript": "^5.4.5",
+    "vite": "^4.5.3"
+  }
+}

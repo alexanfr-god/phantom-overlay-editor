@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "outDir": "out",
+    "baseUrl": ".",
+    "paths": {
+      "@phantom-editor/shared": ["../shared/src/index.ts"]
+    }
+  },
+  "include": ["electron/**/*", "src/**/*"]
+}

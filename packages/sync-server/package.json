@@ -1,0 +1,21 @@
+{
+  "name": "@phantom-editor/sync-server",
+  "version": "0.1.0",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "ts-node --transpile-only -r tsconfig-paths/register --project tsconfig.json src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@phantom-editor/shared": "*",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "^16.18.0",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.4.5"
+  }
+}

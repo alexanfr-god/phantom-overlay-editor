@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+.DS_Store
+*.swp
+/tmp/
+packages/*/out/
+packages/*/dist/
+*.dmg
+.env
+.env.local
+.claude/
