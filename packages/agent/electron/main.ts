@@ -20,12 +20,13 @@ let trackTimer: ReturnType<typeof setInterval> | null = null;
 let lastKey = "";
 let ready = false;
 let missCount = 0;
+let screenMissCount = 0;    // consecutive "wrong screen" detections
 let targetScreen = "password";
-let screenConfirmed = false; // true once we confirmed the target screen
+let unlockCooldownUntil = 0; // timestamp — don't show overlay until this time
 
 // ── Swift source ──────────────────────────────────────────────────────────────
 // Two modes:
-//   no args  → just find popup, output: x,y,w,h
+//   no args  → find popup, output: x,y,w,h
 //   "detect" → find popup + sample pixels, output: x,y,w,h,screen
 const SWIFT_SRC = `
 import CoreGraphics
@@ -89,7 +90,8 @@ let rect = CGRect(
   width: CGFloat(phantom.w), height: CGFloat(phantom.h)
 )
 
-// Use .optionAll to capture screen region (works without per-window permission)
+// .optionAll captures the screen region (works without per-window permission)
+// Caller must hide overlay before running detect mode to avoid self-capture
 if let cgImg = CGWindowListCreateImage(rect, .optionAll, kCGNullWindowID, .bestResolution) {
   let rep = NSBitmapImageRep(cgImage: cgImg)
   let imgW = rep.pixelsWide
@@ -106,11 +108,7 @@ if let cgImg = CGWindowListCreateImage(rect, .optionAll, kCGNullWindowID, .bestR
 
     // Phantom Unlock button purple ~= #ab9ff2 (R~171 G~159 B~242)
     let isPurple = r >= 120 && r <= 230 && g >= 100 && g <= 210 && b >= 180
-    if isPurple {
-      screen = "password"
-    } else {
-      screen = "other"
-    }
+    screen = isPurple ? "password" : "other"
     fputs("[Swift] pixel(\\(sx),\\(sy)) = rgb(\\(r),\\(g),\\(b)) -> \\(screen)\\n", stderr)
   }
 }
@@ -170,6 +168,21 @@ function findPhantom(detect: boolean): Promise<FindResult | null> {
   });
 }
 
+// ── Helper: run detect with overlay hidden to avoid self-capture ──
+function detectWithHide(): Promise<FindResult | null> {
+  return new Promise(async (resolve) => {
+    const wasVisible = overlayWin?.isVisible() ?? false;
+    if (wasVisible) {
+      overlayWin!.hide();
+    }
+    // Small delay to let the window actually hide before screenshot
+    await new Promise((r) => setTimeout(r, 60));
+    const result = await findPhantom(true);
+    // We don't re-show here — caller decides based on result
+    resolve(result);
+  });
+}
+
 // ── Overlay window ──────────────────────────────────────────────────────────
 function applyBounds(b: FindResult) {
   if (!overlayWin) return;
@@ -194,16 +207,13 @@ function applyBounds(b: FindResult) {
   overlayWin.webContents.send("phantom-bounds", b);
 }
 
-function hideOverlay() {
-  missCount++;
-  if (missCount < 3) return;
+function forceHide() {
   if (!overlayWin?.isVisible()) return;
   overlayWin.setIgnoreMouseEvents(true, { forward: true });
   overlayWin.setFocusable(false);
   overlayWin.hide();
   lastKey = "";
   overlayWin.webContents.send("phantom-bounds", null);
-  console.log("[Agent] Overlay hidden");
 }
 
 function createOverlayWindow() {
@@ -257,7 +267,8 @@ function connectWs() {
         if (payload.targetScreen) {
           targetScreen = payload.targetScreen;
         }
-        screenConfirmed = false; // new layout — need to re-detect screen
+        unlockCooldownUntil = 0; // new layout clears cooldown
+        screenMissCount = 0;
         console.log(`[Agent] Layout received — targetScreen="${targetScreen}"`);
       }
     }
@@ -280,6 +291,8 @@ function connectWs() {
 }
 
 // ── App ─────────────────────────────────────────────────────────────────────
+let tracking = false;
+
 app.whenReady().then(async () => {
   if (app.dock) app.dock.hide();
 
@@ -289,48 +302,96 @@ app.whenReady().then(async () => {
   await compileBinary();
 
   // ── Main tracking loop ──
-  // Two phases:
-  // 1. Overlay NOT shown → run with "detect" to sample pixels and verify screen
-  // 2. Overlay IS shown → run fast mode (no pixel sample, overlay would cover Phantom)
-  //    Only hide if Phantom popup disappears entirely
   trackTimer = setInterval(async () => {
-    const overlayVisible = overlayWin?.isVisible() ?? false;
-
-    if (overlayVisible) {
-      // Fast mode — just check Phantom popup still exists
-      const result = await findPhantom(false);
-      if (result) {
-        applyBounds(result); // update position if moved
-      } else {
-        hideOverlay();
-        screenConfirmed = false; // popup gone — need re-detect next time
-      }
-      return;
+    if (tracking) return; // prevent overlapping ticks
+    tracking = true;
+    try {
+      await tick();
+    } finally {
+      tracking = false;
     }
-
-    // Overlay hidden — run detect mode to check screen
-    const result = await findPhantom(true);
-    if (!result) {
-      hideOverlay();
-      return;
-    }
-
-    // Check screen match
-    if (result.screen === targetScreen || result.screen === "unknown") {
-      if (result.screen === targetScreen) {
-        screenConfirmed = true;
-      }
-      applyBounds(result);
-    } else {
-      // Wrong screen — don't show overlay
-      if (tickCount % 25 === 0) {
-        console.log(`[Agent] Screen "${result.screen}" ≠ target "${targetScreen}" — overlay stays hidden`);
-      }
-    }
-  }, 400);
+  }, 500);
 
   console.log("[Agent] Tracking with screen detection");
 });
+
+async function tick() {
+  // Cooldown after unlock — don't show overlay for 2 seconds
+  if (Date.now() < unlockCooldownUntil) return;
+
+  const overlayVisible = overlayWin?.isVisible() ?? false;
+
+  if (overlayVisible) {
+    // Overlay is shown. Periodically re-verify the screen (every ~5 ticks = 2.5s).
+    // To sample pixels, we must hide overlay first to avoid self-capture.
+    if (tickCount % 5 === 0) {
+      const result = await detectWithHide();
+      if (!result) {
+        // Phantom gone
+        missCount++;
+        if (missCount >= 3) {
+          forceHide();
+          console.log("[Agent] Phantom gone — overlay hidden");
+        }
+        return;
+      }
+      missCount = 0;
+
+      if (result.screen === targetScreen || result.screen === "unknown") {
+        screenMissCount = 0;
+        applyBounds(result); // re-show + update position
+      } else {
+        screenMissCount++;
+        if (screenMissCount >= 3) {
+          forceHide();
+          screenMissCount = 0;
+          console.log(`[Agent] Screen changed to "${result.screen}" — overlay hidden`);
+        } else {
+          // Not enough misses yet — re-show overlay
+          applyBounds(result);
+        }
+      }
+      return;
+    }
+
+    // Non-detect tick: fast position check
+    const result = await findPhantom(false);
+    if (result) {
+      missCount = 0;
+      applyBounds(result);
+    } else {
+      missCount++;
+      if (missCount >= 3) {
+        forceHide();
+        console.log("[Agent] Phantom gone — overlay hidden");
+      }
+    }
+    return;
+  }
+
+  // ── Overlay hidden — run detect to check if we should show ──
+  const result = await detectWithHide();
+  if (!result) {
+    missCount++;
+    return;
+  }
+  missCount = 0;
+
+  if (result.screen === targetScreen) {
+    screenMissCount = 0;
+    applyBounds(result);
+    console.log(`[Agent] ✓ Screen matches "${targetScreen}" — overlay shown`);
+  } else if (result.screen === "unknown") {
+    // Can't determine screen (no pixel data) — show anyway
+    screenMissCount = 0;
+    applyBounds(result);
+  } else {
+    // Wrong screen — stay hidden
+    if (tickCount % 25 === 0) {
+      console.log(`[Agent] Screen "${result.screen}" ≠ target "${targetScreen}"`);
+    }
+  }
+}
 
 app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
@@ -344,7 +405,6 @@ ipcMain.handle("get-status", () => ({
   ready,
   lastKey,
   targetScreen,
-  screenConfirmed,
   offset: { x: OFFSET_X, y: OFFSET_Y },
 }));
 
@@ -360,13 +420,10 @@ ipcMain.handle("set-interactive", (_ev, interactive: boolean) => {
   }
 });
 
+// Unlock: hide overlay + set 2-second cooldown
 ipcMain.handle("hide-overlay", () => {
-  if (overlayWin?.isVisible()) {
-    overlayWin.setIgnoreMouseEvents(true, { forward: true });
-    overlayWin.setFocusable(false);
-    overlayWin.hide();
-    lastKey = "";
-    screenConfirmed = false;
-    console.log("[Agent] Overlay hidden (unlock)");
-  }
+  forceHide();
+  unlockCooldownUntil = Date.now() + 2000;
+  screenMissCount = 0;
+  console.log("[Agent] Overlay hidden (unlock) — cooldown 2s");
 });

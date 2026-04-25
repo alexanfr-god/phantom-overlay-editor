@@ -248,7 +248,14 @@ export const LayoutDocumentSchema = z.object({
     width: z.number().positive(),
     height: z.number().positive(),
   }).optional(),
-  targetScreen: PhantomScreenSchema.optional(), // overlay only shows on this screen
+  targetScreen: PhantomScreenSchema.optional(),
+  groups: z.record(z.array(z.string())).optional(),
+  theme: z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    author: z.string().optional(),
+    previewImage: z.string().optional(),
+  }).optional(),
 });
 
 export type LayoutDocument = z.infer<typeof LayoutDocumentSchema>;

@@ -9,8 +9,11 @@ import {
 } from "@dnd-kit/core";
 import { restrictToParentElement } from "@dnd-kit/modifiers";
 import { OverlayElement } from "./OverlayElement";
+import { PhantomMockUI } from "./PhantomMockUI";
 import { useLayoutStore } from "../../store/layoutStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
+
+type PreviewMode = "wcc" | "metamask" | "phantom";
 
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3;
@@ -36,6 +39,7 @@ export function OverlayCanvas() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [refImage, setRefImage] = useState<string | null>(null);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("phantom");
 
   const mouseSensor = useSensor(MouseSensor, {
     activationConstraint: { distance: 4 },
@@ -147,19 +151,38 @@ export function OverlayCanvas() {
         transform: "translateX(-50%)",
         display: "flex",
         alignItems: "center",
-        gap: 6,
+        gap: 4,
         backgroundColor: "rgba(30,30,30,0.95)",
         borderRadius: 8,
-        padding: "4px 10px",
+        padding: "4px 6px",
         zIndex: 100,
         border: "1px solid #333",
       }}>
-        <button onClick={loadRefImage} style={toolBtnStyle}>
-          {refImage ? "Change Reference" : "Load Reference Image"}
+        {/* Preview mode switcher */}
+        <div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: 6 }}>
+          {(["wcc", "metamask", "phantom"] as PreviewMode[]).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setPreviewMode(mode)}
+              style={{
+                ...toolBtnStyle,
+                backgroundColor: previewMode === mode ? "#ab9ff2" : "transparent",
+                color: previewMode === mode ? "#1a1a2e" : "#888",
+                border: previewMode === mode ? "1px solid #ab9ff2" : "1px solid #444",
+                fontWeight: previewMode === mode ? 700 : 400,
+              }}
+            >
+              {mode === "wcc" ? "WCC Local" : mode === "metamask" ? "MetaMask" : "Phantom"}
+            </button>
+          ))}
+        </div>
+        <div style={{ width: 1, height: 16, backgroundColor: "#333" }} />
+        <button onClick={loadRefImage} style={{ ...toolBtnStyle, marginLeft: 4 }}>
+          {refImage ? "Change Ref" : "Ref Image"}
         </button>
         {refImage && (
           <button onClick={() => setRefImage(null)} style={{ ...toolBtnStyle, color: "#f87171" }}>
-            Clear
+            ✕
           </button>
         )}
       </div>
@@ -206,14 +229,38 @@ export function OverlayCanvas() {
             boxShadow: "0 0 0 1px #444, 0 24px 80px rgba(0,0,0,0.6)",
             borderRadius: 0,
             overflow: "hidden",
-            backgroundColor: "#111111",
-            backgroundImage:
-              "linear-gradient(45deg, #161616 25%, transparent 25%, transparent 75%, #161616 75%), " +
-              "linear-gradient(45deg, #161616 25%, transparent 25%, transparent 75%, #161616 75%)",
+            backgroundColor: previewMode === "phantom" ? "#131217" : "#111111",
+            backgroundImage: previewMode === "phantom" ? "none"
+              : "linear-gradient(45deg, #161616 25%, transparent 25%, transparent 75%, #161616 75%), " +
+                "linear-gradient(45deg, #161616 25%, transparent 25%, transparent 75%, #161616 75%)",
             backgroundSize: "16px 16px",
             backgroundPosition: "0 0, 8px 8px",
           }}
         >
+          {/* Preview backgrounds */}
+          {previewMode === "phantom" && (
+            <div style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+              <PhantomMockUI />
+            </div>
+          )}
+          {previewMode === "metamask" && (
+            <div style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+              backgroundColor: "#1f1f1f",
+            }}>
+              <span style={{ fontSize: 40 }}>🦊</span>
+              <span style={{ fontSize: 13, color: "#888" }}>MetaMask — live via Chrome</span>
+              <span style={{ fontSize: 11, color: "#555" }}>Connect Chrome extension to enable</span>
+            </div>
+          )}
+
           {/* Reference image */}
           {refImage && (
             <img
@@ -227,6 +274,7 @@ export function OverlayCanvas() {
                 objectFit: "cover",
                 pointerEvents: "none",
                 opacity: 0.5,
+                zIndex: 1,
               }}
             />
           )}
@@ -236,6 +284,7 @@ export function OverlayCanvas() {
             style={{
               position: "absolute",
               inset: 0,
+              zIndex: 10,
               opacity: debug.overlayEnabled ? debug.overlayOpacity : 0,
               transition: "opacity 0.2s",
               pointerEvents: debug.overlayEnabled ? "auto" : "none",

@@ -102,26 +102,20 @@ export function ElementControls() {
       {/* Content */}
       {(el.type === "button" || el.type === "text") && (
         <Section title="Content">
-          <label style={{ fontSize: 10, color: "#888", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Text
-          </label>
-          <input
-            value={String(el.content.text ?? "")}
-            onChange={(e) => u({ content: { ...el.content, text: e.target.value } })}
-            style={{
-              marginTop: 4,
-              width: "100%",
-              height: 30,
-              backgroundColor: "#2a2a2a",
-              border: "1px solid #3a3a3a",
-              borderRadius: 6,
-              color: "#e8e8e8",
-              fontSize: 13,
-              padding: "0 8px",
-              outline: "none",
-              boxSizing: "border-box",
-            }}
-          />
+          <ContentInput label="Text" value={String(el.content.text ?? "")}
+            onChange={(v) => u({ content: { ...el.content, text: v } })} />
+        </Section>
+      )}
+      {el.type === "input" && (
+        <Section title="Content">
+          <ContentInput label="Placeholder" value={String(el.content.placeholder ?? "")}
+            onChange={(v) => u({ content: { ...el.content, placeholder: v } })} />
+        </Section>
+      )}
+      {el.type === "image" && (
+        <Section title="Content">
+          <ContentInput label="Image URL" value={String(el.content.src ?? "")}
+            onChange={(v) => u({ content: { ...el.content, src: v } })} />
         </Section>
       )}
 
