@@ -90,3 +90,16 @@ ipcMain.handle("project:autoload", () => {
   if (!existsSync(AUTOSAVE_PATH)) return null;
   return readFileSync(AUTOSAVE_PATH, "utf-8");
 });
+
+// ── Publish layout to wacocu.app ────────────────────────────────────────────
+const WCC_PUBLIC = join(__dirname, "../../../../solana-style-studio/public/phantom-layout.json");
+
+ipcMain.handle("project:publish-to-wcc", (_event, data: string) => {
+  try {
+    writeFileSync(WCC_PUBLIC, data, "utf-8");
+    return { ok: true, path: WCC_PUBLIC };
+  } catch (e: any) {
+    // Fallback: let user pick the wacocu public folder
+    return { ok: false, error: e.message };
+  }
+});

@@ -14,6 +14,7 @@ declare global {
       loadProject: () => Promise<{ path: string; content: string } | null>;
       autosave: (data: string) => Promise<void>;
       autoload: () => Promise<string | null>;
+      publishToWCC: (data: string) => Promise<{ ok: boolean; path?: string; error?: string }>;
     };
   }
 }
@@ -64,6 +65,26 @@ export default function App() {
     }
   }, [loadProjectData, pushLog]);
 
+  const handlePublishToWCC = useCallback(async () => {
+    if (elements.length === 0) {
+      pushLog("Nothing to publish — add elements first");
+      return;
+    }
+    const payload = JSON.stringify({
+      canvas: { width: canvas.width, height: canvas.height },
+      screen: activeScreen,
+      elements,
+      publishedAt: new Date().toISOString(),
+    }, null, 2);
+
+    const result = await window.api?.publishToWCC(payload);
+    if (result?.ok) {
+      pushLog(`✅ Published ${elements.length} element(s) to wacocu.app`);
+    } else {
+      pushLog(`❌ Publish failed: ${result?.error ?? "unknown error"}`);
+    }
+  }, [elements, canvas, activeScreen, pushLog]);
+
   const handleApply = () => {
     if (elements.length === 0) {
       pushLog("Nothing to sync — add some elements first");
@@ -112,6 +133,18 @@ export default function App() {
         } as React.CSSProperties}>
           <button onClick={handleLoad} style={titleBarBtn}>Open</button>
           <button onClick={handleSave} style={titleBarBtn}>Save</button>
+          <button
+            onClick={handlePublishToWCC}
+            style={{
+              ...titleBarBtn,
+              backgroundColor: elements.length > 0 ? "#ab9ff2" : "transparent",
+              color: elements.length > 0 ? "#1a1a2e" : "#555",
+              border: elements.length > 0 ? "1px solid #ab9ff2" : "1px solid #333",
+              fontWeight: 600,
+            }}
+          >
+            ↑ Publish to WCC
+          </button>
         </div>
       </div>
 
