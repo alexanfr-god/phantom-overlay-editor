@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, screen, globalShortcut } from "electron";
 import { join } from "path";
 import { execFile, exec } from "child_process";
 import { writeFileSync } from "fs";
@@ -23,18 +23,135 @@ let missCount = 0;
 let screenMissCount = 0;    // consecutive "wrong screen" detections
 let targetScreen = "password";
 let unlockCooldownUntil = 0; // timestamp — don't show overlay until this time
+let layoutFreshUntil = 0;   // show overlay unconditionally for 10s after layout:push
 
 // ── Swift source ──────────────────────────────────────────────────────────────
-// Two modes:
-//   no args  → find popup, output: x,y,w,h
-//   "detect" → find popup + sample pixels, output: x,y,w,h,screen
+// Modes:
+//   <no args>       → find popup, output: x,y,w,h,pid
+//   detect          → find popup + sample pixels, output: x,y,w,h,pid,screen
+//   inject <pid>    → read text from stdin, type each char into pid via CGEvent
+//   key <pid> <id>  → send a special key (return | tab | escape | backspace) to pid
+//
+// Special-key injection uses Cocoa virtual keycodes; text injection uses
+// CGEvent.keyboardSetUnicodeString so the entire char range works (incl.
+// non-ASCII passwords). Events are posted directly to the target pid via
+// .postToPid, which delivers the keystroke without taking focus from
+// our overlay window.
 const SWIFT_SRC = `
 import CoreGraphics
 import Foundation
 import AppKit
 
-let detectMode = CommandLine.arguments.contains("detect")
+let args = CommandLine.arguments
+let detectMode = args.contains("detect")
+let mode: String = args.count >= 2 ? args[1] : ""
 
+// ────────────────────────────────────────────────────────────────────────────
+// inject mode: type Unicode text into a target pid
+// ────────────────────────────────────────────────────────────────────────────
+if mode == "inject" {
+  guard args.count >= 3, let pid = Int32(args[2]) else {
+    fputs("usage: phantom_finder inject <pid>  (text on stdin)\\n", stderr)
+    exit(2)
+  }
+  let data = FileHandle.standardInput.readDataToEndOfFile()
+  guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { exit(0) }
+
+  for scalar in text.unicodeScalars {
+    var chars: [UniChar] = []
+    let s = String(scalar)
+    for u in s.utf16 { chars.append(u) }
+
+    let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+    chars.withUnsafeBufferPointer { buf in
+      down.keyboardSetUnicodeString(stringLength: buf.count, unicodeString: buf.baseAddress)
+    }
+    down.postToPid(pid)
+
+    let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)!
+    chars.withUnsafeBufferPointer { buf in
+      up.keyboardSetUnicodeString(stringLength: buf.count, unicodeString: buf.baseAddress)
+    }
+    up.postToPid(pid)
+
+    // Tiny gap between events so React's onChange has time to settle
+    usleep(2000)
+  }
+  exit(0)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// click mode: simulate a left-click at absolute screen coordinates
+// ────────────────────────────────────────────────────────────────────────────
+if mode == "click" {
+  guard args.count >= 5,
+        let pid = Int32(args[2]),
+        let x = Double(args[3]),
+        let y = Double(args[4]) else {
+    fputs("usage: phantom_finder click <pid> <x> <y>\\n", stderr)
+    exit(2)
+  }
+  let target = CGPoint(x: x, y: y)
+
+  // Save cursor position so we can warp it back after the click — keeps the
+  // user's pointer where they had it instead of jumping to the button center.
+  let original = CGEvent(source: nil)?.location ?? target
+
+  // postToPid is unreliable for mouse events (the OS routes them by screen
+  // location). Posting at .cghidEventTap goes through the standard input
+  // pipeline so Chrome receives the click on Phantom's Unlock button.
+  let down = CGEvent(mouseEventSource: nil,
+                     mouseType: .leftMouseDown,
+                     mouseCursorPosition: target,
+                     mouseButton: .left)!
+  down.post(tap: .cghidEventTap)
+  usleep(20_000)
+
+  let up = CGEvent(mouseEventSource: nil,
+                   mouseType: .leftMouseUp,
+                   mouseCursorPosition: target,
+                   mouseButton: .left)!
+  up.post(tap: .cghidEventTap)
+  usleep(20_000)
+
+  // Warp back so user doesn't see the cursor jump
+  CGWarpMouseCursorPosition(original)
+
+  // Suppress the next mouse move so the warp doesn't generate a stray event
+  CGAssociateMouseAndMouseCursorPosition(1)
+  fputs("[Swift] click \\(x),\\(y) on pid=\\(pid)\\n", stderr)
+  exit(0)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// key mode: send a single special key to a target pid
+// ────────────────────────────────────────────────────────────────────────────
+if mode == "key" {
+  guard args.count >= 4, let pid = Int32(args[2]) else {
+    fputs("usage: phantom_finder key <pid> <return|tab|escape|backspace>\\n", stderr)
+    exit(2)
+  }
+  let keyName = args[3].lowercased()
+  let codes: [String: CGKeyCode] = [
+    "return": 36, "enter": 36,
+    "tab": 48,
+    "escape": 53, "esc": 53,
+    "backspace": 51, "delete": 51,
+  ]
+  guard let kc = codes[keyName] else {
+    fputs("[Swift] Unknown key name: \\(keyName)\\n", stderr)
+    exit(3)
+  }
+  let down = CGEvent(keyboardEventSource: nil, virtualKey: kc, keyDown: true)!
+  down.postToPid(pid)
+  let up = CGEvent(keyboardEventSource: nil, virtualKey: kc, keyDown: false)!
+  up.postToPid(pid)
+  exit(0)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// find/detect mode (default)
+// ────────────────────────────────────────────────────────────────────────────
 let opts = CGWindowListOption(rawValue:
   CGWindowListOption.optionOnScreenOnly.rawValue |
   CGWindowListOption.excludeDesktopElements.rawValue)
@@ -45,6 +162,8 @@ let BLOCKED = ["metamask", "rabby", "coinbase", "keplr", "trust"]
 struct WinMatch {
   let x: Int, y: Int, w: Int, h: Int
   let layer: Int, name: String, priority: Int
+  let windowNumber: Int
+  let pid: Int
 }
 
 var candidates: [WinMatch] = []
@@ -67,60 +186,57 @@ for w in wins {
   if BLOCKED.contains(where: { lower.contains($0) }) { continue }
 
   let isPhantom = lower.contains("phantom") || name.contains("bfnaelmomeimhlpmgjnjophhpkkoljpa")
+  let wn = w["kCGWindowNumber"] as? Int ?? 0
+  let pid = w["kCGWindowOwnerPID"] as? Int ?? 0
   candidates.append(WinMatch(
     x: Int(x), y: Int(y), w: Int(wd), h: Int(ht),
     layer: layer, name: name,
-    priority: isPhantom ? 0 : 1
+    priority: isPhantom ? 0 : 1,
+    windowNumber: wn,
+    pid: pid
   ))
 }
 
 candidates.sort { $0.priority < $1.priority }
-guard let phantom = candidates.first else { exit(0) }
+// Only return a window when we've confirmed it's actually Phantom — the
+// previous fallback (any small Chrome window) caused the overlay to stick
+// around after the popup closed, attaching itself to whatever popup or
+// developer-tools window happened to match the size filter.
+guard let phantom = candidates.first, phantom.priority == 0 else { exit(0) }
 
-// ── Fast mode: just output bounds ──
+// Fast mode: just output bounds + pid
 if !detectMode {
-  print("\\(phantom.x),\\(phantom.y),\\(phantom.w),\\(phantom.h)")
+  print("\\(phantom.x),\\(phantom.y),\\(phantom.w),\\(phantom.h),\\(phantom.pid)")
   exit(0)
 }
 
-// ── Detect mode: sample pixels to determine screen ──
+// Detect mode: per-window pixel sample to determine which screen of Phantom is up
 var screen = "unknown"
-let rect = CGRect(
-  x: CGFloat(phantom.x), y: CGFloat(phantom.y),
-  width: CGFloat(phantom.w), height: CGFloat(phantom.h)
-)
-
-// .optionAll captures the screen region (works without per-window permission)
-// Caller must hide overlay before running detect mode to avoid self-capture
-if let cgImg = CGWindowListCreateImage(rect, .optionAll, kCGNullWindowID, .bestResolution) {
+let phantomWinId = CGWindowID(phantom.windowNumber)
+if let cgImg = CGWindowListCreateImage(CGRect.null, .optionIncludingWindow, phantomWinId, .bestResolution) {
   let rep = NSBitmapImageRep(cgImage: cgImg)
   let imgW = rep.pixelsWide
   let imgH = rep.pixelsHigh
-
-  // Sample center of Unlock button area (x=50%, y=81%)
   let sx = imgW / 2
   let sy = Int(Double(imgH) * 0.81)
-
   if let color = rep.colorAt(x: sx, y: sy) {
     let r = Int(color.redComponent * 255)
     let g = Int(color.greenComponent * 255)
     let b = Int(color.blueComponent * 255)
-
-    // Phantom Unlock button purple ~= #ab9ff2 (R~171 G~159 B~242)
     let isPurple = r >= 120 && r <= 230 && g >= 100 && g <= 210 && b >= 180
     screen = isPurple ? "password" : "other"
     fputs("[Swift] pixel(\\(sx),\\(sy)) = rgb(\\(r),\\(g),\\(b)) -> \\(screen)\\n", stderr)
   }
 }
 
-print("\\(phantom.x),\\(phantom.y),\\(phantom.w),\\(phantom.h),\\(screen)")
+print("\\(phantom.x),\\(phantom.y),\\(phantom.w),\\(phantom.h),\\(phantom.pid),\\(screen)")
 `;
 
 function compileBinary(): Promise<void> {
   return new Promise((resolve) => {
     const src = BIN + ".swift";
     writeFileSync(src, SWIFT_SRC);
-    execFile("swiftc", ["-O", "-o", BIN, src], { timeout: 30000 }, (err) => {
+    execFile("/usr/bin/swiftc", ["-O", "-o", BIN, src], { timeout: 60000 }, (err) => {
       if (err) console.error("[Agent] Swift compile error:", err.message);
       else console.log("[Agent] ✓ Swift binary compiled");
       ready = !err;
@@ -131,10 +247,12 @@ function compileBinary(): Promise<void> {
 
 interface FindResult {
   x: number; y: number; width: number; height: number;
+  pid?: number;
   screen?: string;
 }
 
 let tickCount = 0;
+let phantomPid: number | null = null; // last known Chrome PID hosting Phantom popup
 
 function findPhantom(detect: boolean): Promise<FindResult | null> {
   return new Promise((resolve) => {
@@ -148,6 +266,8 @@ function findPhantom(detect: boolean): Promise<FindResult | null> {
         console.log(`[Agent] ${stderr.trim()}`);
       }
 
+      // Fast mode  : x,y,w,h,pid
+      // Detect mode: x,y,w,h,pid,screen
       const parts = stdout.trim().split(",");
       if (parts.length < 4) { resolve(null); return; }
 
@@ -155,32 +275,67 @@ function findPhantom(detect: boolean): Promise<FindResult | null> {
       const y = parseInt(parts[1]);
       const w = parseInt(parts[2]);
       const h = parseInt(parts[3]);
-      const screen = parts[4]; // undefined if fast mode
+      const pid = parts[4] ? parseInt(parts[4]) : NaN;
+      const screen = parts[5]; // undefined in fast mode
 
       if (isNaN(x) || isNaN(y) || isNaN(w) || isNaN(h)) { resolve(null); return; }
 
+      if (!isNaN(pid) && pid > 0) phantomPid = pid;
+
       if (tickCount <= 3 || tickCount % 50 === 0) {
-        console.log(`[Agent] tick#${tickCount} Phantom ${w}x${h} at ${x},${y}${screen ? ` screen="${screen}"` : ""}`);
+        console.log(`[Agent] tick#${tickCount} Phantom ${w}x${h} at ${x},${y} pid=${phantomPid}${screen ? ` screen="${screen}"` : ""}`);
       }
 
-      resolve({ x, y, width: w, height: h, screen });
+      resolve({ x, y, width: w, height: h, pid: isNaN(pid) ? undefined : pid, screen });
     });
   });
 }
 
-// ── Helper: run detect with overlay hidden to avoid self-capture ──
-function detectWithHide(): Promise<FindResult | null> {
-  return new Promise(async (resolve) => {
-    const wasVisible = overlayWin?.isVisible() ?? false;
-    if (wasVisible) {
-      overlayWin!.hide();
-    }
-    // Small delay to let the window actually hide before screenshot
-    await new Promise((r) => setTimeout(r, 60));
-    const result = await findPhantom(true);
-    // We don't re-show here — caller decides based on result
-    resolve(result);
+// ── Inject keystrokes into the tracked Phantom Chrome process ──────────────
+// Spawn the Swift binary in `inject` or `key` mode and post events directly
+// to Phantom's pid via CGEvent.postToPid. Focus stays on our overlay.
+function injectText(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!ready)              return reject(new Error("Swift binary not ready"));
+    if (!phantomPid)         return reject(new Error("Phantom pid unknown — not yet detected"));
+    if (!text || text === "") return resolve();
+
+    const child = execFile(BIN, ["inject", String(phantomPid)], { timeout: 5000 }, (err) => {
+      if (err) reject(err); else resolve();
+    });
+    child.stdin?.write(text);
+    child.stdin?.end();
   });
+}
+
+function injectKey(name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!ready)      return reject(new Error("Swift binary not ready"));
+    if (!phantomPid) return reject(new Error("Phantom pid unknown — not yet detected"));
+    execFile(BIN, ["key", String(phantomPid), name], { timeout: 2000 }, (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}
+
+// Inject a left-click at absolute screen coordinates (x, y). Used by the
+// overlay's themed Unlock button to actually press Phantom's real button.
+function injectClickAbs(x: number, y: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!ready)      return reject(new Error("Swift binary not ready"));
+    if (!phantomPid) return reject(new Error("Phantom pid unknown — not yet detected"));
+    execFile(BIN, ["click", String(phantomPid), String(Math.round(x)), String(Math.round(y))],
+             { timeout: 2000 }, (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}
+
+// ── Helper: detect Phantom screen without hiding overlay ──
+// Uses per-window CGWindowListCreateImage in the Swift binary, which
+// captures only Phantom's pixels (our overlay window is excluded).
+function detectScreen(): Promise<FindResult | null> {
+  return findPhantom(true);
 }
 
 // ── Overlay window ──────────────────────────────────────────────────────────
@@ -269,7 +424,8 @@ function connectWs() {
         }
         unlockCooldownUntil = 0; // new layout clears cooldown
         screenMissCount = 0;
-        console.log(`[Agent] Layout received — targetScreen="${targetScreen}"`);
+        layoutFreshUntil = Date.now() + 10_000; // show unconditionally for 10s
+        console.log(`[Agent] Layout received — targetScreen="${targetScreen}" (fresh for 10s)`);
       }
     }
 
@@ -313,6 +469,26 @@ app.whenReady().then(async () => {
   }, 500);
 
   console.log("[Agent] Tracking with screen detection");
+
+  // ── Global opacity shortcut ───────────────────────────────────────────────
+  // Cmd+Opt+O cycles overlay opacity through 1.0 → 0.6 → 0.3 → 0.1 so the
+  // tester can see Phantom's native UI through the mask while debugging.
+  // Forwards as overlay:opacity ws-message into the renderer, same path as
+  // the desktop admin's slider.
+  const OPACITY_CYCLE = [1, 0.6, 0.3, 0.1];
+  let opacityIdx = 0;
+  const opacityShortcut = "CommandOrControl+Alt+O";
+  const registered = globalShortcut.register(opacityShortcut, () => {
+    opacityIdx = (opacityIdx + 1) % OPACITY_CYCLE.length;
+    const value = OPACITY_CYCLE[opacityIdx];
+    overlayWin?.webContents.send("ws-message", { type: "overlay:opacity", value });
+    console.log(`[Agent] Opacity shortcut → ${value}`);
+  });
+  if (!registered) console.warn(`[Agent] Failed to register ${opacityShortcut}`);
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
 });
 
 async function tick() {
@@ -322,73 +498,62 @@ async function tick() {
   const overlayVisible = overlayWin?.isVisible() ?? false;
 
   if (overlayVisible) {
-    // Overlay is shown. Periodically re-verify the screen (every ~5 ticks = 2.5s).
-    // To sample pixels, we must hide overlay first to avoid self-capture.
-    if (tickCount % 5 === 0) {
-      const result = await detectWithHide();
-      if (!result) {
-        // Phantom gone
-        missCount++;
-        if (missCount >= 3) {
-          forceHide();
-          console.log("[Agent] Phantom gone — overlay hidden");
-        }
-        return;
-      }
-      missCount = 0;
-
-      if (result.screen === targetScreen || result.screen === "unknown") {
-        screenMissCount = 0;
-        applyBounds(result); // re-show + update position
-      } else {
-        screenMissCount++;
-        if (screenMissCount >= 3) {
-          forceHide();
-          screenMissCount = 0;
-          console.log(`[Agent] Screen changed to "${result.screen}" — overlay hidden`);
-        } else {
-          // Not enough misses yet — re-show overlay
-          applyBounds(result);
-        }
-      }
-      return;
-    }
-
-    // Non-detect tick: fast position check
+    // ── Overlay is shown: fast position check every tick ────────────────────
     const result = await findPhantom(false);
     if (result) {
       missCount = 0;
       applyBounds(result);
     } else {
       missCount++;
-      if (missCount >= 3) {
+      // Require 6 consecutive misses (~3s) before hiding — avoids false negatives
+      if (missCount >= 6) {
         forceHide();
+        missCount = 0;
         console.log("[Agent] Phantom gone — overlay hidden");
+      }
+    }
+
+    // ── Periodic screen check every 10 ticks (~5s) ──────────────────────────
+    // detectScreen() captures only the Phantom window by CGWindowID so our
+    // overlay is never included — no flicker, no hide/show required.
+    if (tickCount % 10 === 0) {
+      const check = await detectScreen();
+      if (check?.screen && check.screen !== "unknown" && check.screen !== targetScreen) {
+        screenMissCount++;
+        if (screenMissCount >= 2) {  // 2 consecutive wrong-screen detections → hide
+          forceHide();
+          screenMissCount = 0;
+          console.log(`[Agent] Screen changed to "${check.screen}" (target="${targetScreen}") — overlay hidden`);
+        }
+      } else {
+        screenMissCount = 0;
       }
     }
     return;
   }
 
-  // ── Overlay hidden — run detect to check if we should show ──
-  const result = await detectWithHide();
+  // ── Overlay hidden — run detect to decide if we should show ─────────────
+  const result = await detectScreen();
   if (!result) {
     missCount++;
     return;
   }
   missCount = 0;
 
-  if (result.screen === targetScreen) {
+  // Show overlay on password screen OR any time we can't determine screen.
+  // Also show immediately after receiving a new layout:push (layoutFreshUntil).
+  const isFresh = Date.now() < layoutFreshUntil;
+  if (result.screen === targetScreen || result.screen === "unknown" || isFresh) {
     screenMissCount = 0;
     applyBounds(result);
-    console.log(`[Agent] ✓ Screen matches "${targetScreen}" — overlay shown`);
-  } else if (result.screen === "unknown") {
-    // Can't determine screen (no pixel data) — show anyway
-    screenMissCount = 0;
-    applyBounds(result);
+    if (isFresh) {
+      console.log(`[Agent] ✓ Fresh layout — overlay shown on screen="${result.screen}"`);
+    } else {
+      console.log(`[Agent] ✓ Screen matches "${targetScreen}" — overlay shown`);
+    }
   } else {
-    // Wrong screen — stay hidden
     if (tickCount % 25 === 0) {
-      console.log(`[Agent] Screen "${result.screen}" ≠ target "${targetScreen}"`);
+      console.log(`[Agent] Screen "${result.screen}" ≠ target "${targetScreen}" — waiting`);
     }
   }
 }
@@ -426,4 +591,134 @@ ipcMain.handle("hide-overlay", () => {
   unlockCooldownUntil = Date.now() + 2000;
   screenMissCount = 0;
   console.log("[Agent] Overlay hidden (unlock) — cooldown 2s");
+});
+
+// ── Keystroke / key forwarding to Phantom (CGEvent.postToPid) ──────────────
+// The overlay's themed <input> captures user typing and forwards each new
+// character or special key here; we relay through the Swift binary, which
+// posts CGEvents directly to Chrome's pid so focus stays in our overlay.
+ipcMain.handle("inject-text", async (_ev, text: string) => {
+  try {
+    await injectText(text);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+ipcMain.handle("inject-key", async (_ev, name: string) => {
+  try {
+    await injectKey(name);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+// Click at a position expressed as fractions of the overlay window (xPct,
+// yPct ∈ [0,1]). Main converts to absolute screen coords using the overlay's
+// current bounds — Phantom popup is at the same coords because we track it.
+//
+// Critical: the overlay sits on top of Phantom. CGEvent posted at
+// .cghidEventTap routes to whatever window is at that screen position. If
+// the overlay is in captive mode it would re-intercept the click. So we
+// briefly disable captive mode (forwarding clicks through) for the
+// injection, then let the cursor poller restore it.
+ipcMain.handle("inject-click", async (_ev, xPct: number, yPct: number) => {
+  if (!overlayWin) return { ok: false, error: "overlay not ready" };
+  const b = overlayWin.getBounds();
+  const ax = b.x + xPct * b.width;
+  const ay = b.y + yPct * b.height;
+
+  const wasCaptive = captiveActive;
+  if (wasCaptive) {
+    overlayWin.setIgnoreMouseEvents(true, { forward: true });
+    overlayWin.setFocusable(false);
+    captiveActive = false;
+  }
+
+  try {
+    await injectClickAbs(ax, ay);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  } finally {
+    // The cursor poller (80ms interval) will re-enable captive mode if the
+    // user's cursor is still over an interactive region. Push the grace
+    // window forward so a stray cursor jump doesn't immediately re-flip it.
+    captiveHoldUntil = Date.now() + 200;
+  }
+});
+
+ipcMain.handle("get-phantom-pid", () => phantomPid);
+
+// ── Captive-region cursor polling ──────────────────────────────────────────
+// The overlay defaults to setIgnoreMouseEvents(true, {forward:true}) so all
+// clicks pass through to Phantom. But on the password screen we need to
+// capture clicks on certain regions (the themed input, the unlock button) so
+// the overlay can handle them instead and forward via injectText / injectKey.
+//
+// Overlay sends "captive regions" as percentages of the canvas. Main polls
+// the global cursor every 80ms; when the cursor is over any captive region
+// AND the overlay is visible, the window is switched to interactive mode
+// (setIgnoreMouseEvents(false), focusable). When the cursor leaves all
+// regions AND no overlay element currently holds focus, we revert.
+interface CaptivePctRegion { x: number; y: number; w: number; h: number }
+let captiveRegions: CaptivePctRegion[] = [];
+let captiveActive = false;
+let captiveHoldUntil = 0; // grace period after entering, prevents flap
+
+function updateCaptiveMode(forceOff = false): void {
+  if (!overlayWin || !overlayWin.isVisible()) {
+    if (captiveActive) {
+      overlayWin?.setIgnoreMouseEvents(true, { forward: true });
+      overlayWin?.setFocusable(false);
+      captiveActive = false;
+    }
+    return;
+  }
+  if (forceOff || captiveRegions.length === 0) {
+    if (captiveActive) {
+      overlayWin.setIgnoreMouseEvents(true, { forward: true });
+      overlayWin.setFocusable(false);
+      captiveActive = false;
+    }
+    return;
+  }
+
+  const cur = screen.getCursorScreenPoint();
+  const bounds = overlayWin.getBounds();
+  const inCaptive = captiveRegions.some((r) => {
+    const ax = bounds.x + r.x * bounds.width;
+    const ay = bounds.y + r.y * bounds.height;
+    const aw = r.w * bounds.width;
+    const ah = r.h * bounds.height;
+    return cur.x >= ax && cur.x <= ax + aw && cur.y >= ay && cur.y <= ay + ah;
+  });
+
+  if (inCaptive) {
+    captiveHoldUntil = Date.now() + 800; // hold captive for 800ms after last hover
+    if (!captiveActive) {
+      overlayWin.setIgnoreMouseEvents(false);
+      overlayWin.setFocusable(true);
+      captiveActive = true;
+    }
+  } else if (captiveActive && Date.now() > captiveHoldUntil) {
+    overlayWin.setIgnoreMouseEvents(true, { forward: true });
+    overlayWin.setFocusable(false);
+    captiveActive = false;
+  }
+}
+
+setInterval(updateCaptiveMode, 80);
+
+ipcMain.handle("set-captive-regions", (_ev, regions: CaptivePctRegion[]) => {
+  captiveRegions = Array.isArray(regions) ? regions : [];
+  console.log(`[Agent] Captive regions: ${captiveRegions.length}`);
+});
+
+// Renderer signals it's actively typing — extend captive grace window so
+// the overlay can't flip back to pass-through mid-keystroke.
+ipcMain.handle("captive-extend", () => {
+  captiveHoldUntil = Date.now() + 1500;
 });
