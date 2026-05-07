@@ -242,24 +242,69 @@ function ElContent({ el, anchorId }: { el: LayoutElement; anchorId: string }): R
       );
 
     case "image":
-      return el.content.src ? (
-        <img
-          src={String(el.content.src)}
-          alt={el.label ?? ""}
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: (el.styles.objectFit as React.CSSProperties["objectFit"]) ?? "cover",
-            borderRadius: "inherit",
-            pointerEvents: "none",
-          }}
+      // If the layout-doc supplied a logo URL, render it directly (future
+      // AI-generated per-theme logos land here). Otherwise we mirror the
+      // Lovable mockup's DynamicPhantomRenderer fallback — same SVG path so
+      // overlay and mockup are visually identical.
+      if (el.content.src) {
+        return (
+          <img
+            src={String(el.content.src)}
+            alt={el.label ?? ""}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: (el.styles.objectFit as React.CSSProperties["objectFit"]) ?? "cover",
+              borderRadius: "inherit",
+              pointerEvents: "none",
+            }}
+          />
+        );
+      }
+      // Default Phantom-style ghost. fill comes from theme accent (el.styles.color).
+      // textShadow → drop-shadow filter so the themed glow applies to the SVG too.
+      return (
+        <PhantomGhostFallback
+          fill={(el.styles.color as string) ?? "#ab9ff2"}
+          textShadow={(el.styles.textShadow as string) ?? ""}
         />
-      ) : null;
+      );
 
     case "container":
     default:
       return null;
   }
+}
+
+// ── Phantom-style ghost SVG fallback ───────────────────────────────────────
+// Matches DynamicPhantomRenderer.tsx (Lovable mockup) line-for-line so the
+// live overlay and the customizer mockup show pixel-identical logos. Theme
+// accent color drives `fill`; theme text-shadow becomes a CSS drop-shadow
+// filter so the glow follows along.
+function PhantomGhostFallback({ fill, textShadow }: { fill: string; textShadow: string }): React.ReactElement {
+  // Convert any number of comma-separated text-shadow stops into matching
+  // drop-shadow filters. Empty string → mild default depth shadow.
+  const filter = textShadow.trim()
+    ? textShadow.split(",").map((s) => `drop-shadow(${s.trim()})`).join(" ")
+    : "drop-shadow(0 4px 12px rgba(0,0,0,0.3))";
+
+  return (
+    <svg
+      viewBox="0 0 60 60"
+      width="100%"
+      height="100%"
+      fill="none"
+      style={{ filter, pointerEvents: "none", display: "block" }}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        fill={fill}
+        d="M30 5C18.95 5 10 13.95 10 25v25l6.67-5.56 6.66 5.56 6.67-5.56 6.67 5.56 6.66-5.56L50 50V25C50 13.95 41.05 5 30 5z"
+      />
+      <circle cx="23" cy="26" r="3" fill="white" />
+      <circle cx="37" cy="26" r="3" fill="white" />
+    </svg>
+  );
 }
 
 // ── Button (Unlock) — pressing it injects a real click on Phantom's button ─
