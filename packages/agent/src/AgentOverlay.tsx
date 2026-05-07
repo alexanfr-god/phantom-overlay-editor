@@ -213,10 +213,10 @@ function ElContent({ el, anchorId }: { el: LayoutElement; anchorId: string }): R
     pointerEvents: "none",
   };
 
-  // Themed Phantom ghost logo (vector — no Phantom asset, our own copy).
-  if (anchorId === "logo" || anchorId === "phantom-logo") {
-    return <PhantomGhost styles={el.styles} />;
-  }
+  // Logo: render whatever the layout-doc says (typically the 👻 emoji)
+  // styled by the theme. Fallthrough to the text/button case below so the
+  // exact same path runs for the Lovable mockup and the live overlay
+  // (visual parity guaranteed).
 
   switch (el.type) {
     case "text":
@@ -260,41 +260,6 @@ function ElContent({ el, anchorId }: { el: LayoutElement; anchorId: string }): R
     default:
       return null;
   }
-}
-
-// ── Themed Phantom-style ghost SVG ────────────────────────────────────────
-// Our own vector copy. Color comes from the theme via the element's `color`
-// (fill) and `textShadow` (drop-shadow) styles; nothing here references the
-// real Phantom asset.
-function PhantomGhost({ styles }: { styles: Record<string, string> }): React.ReactElement {
-  const fill = styles.color ?? "#FFFFFF";
-  const textShadow = styles.textShadow ?? "";
-
-  // Convert any text-shadow value into an equivalent CSS filter so the SVG
-  // gets the same glow that themed text would.
-  const filter = textShadow
-    ? textShadow
-        .split(",")
-        .map((s) => `drop-shadow(${s.trim()})`)
-        .join(" ")
-    : `drop-shadow(0 4px 12px rgba(0,0,0,0.3))`;
-
-  return (
-    <svg
-      viewBox="0 0 128 128"
-      width="100%"
-      height="100%"
-      style={{ filter, pointerEvents: "none", display: "block" }}
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path
-        fill={fill}
-        d="M64 16C39.7 16 20 35.7 20 60v44c0 4.4 5.1 6.9 8.5 4.2l9.5-7.5 9.5 7.5c2.2 1.7 5.3 1.7 7.5 0l9.5-7.5 9.5 7.5c2.2 1.7 5.3 1.7 7.5 0l9.5-7.5 9.5 7.5c3.4 2.7 8.5.2 8.5-4.2V60c0-24.3-19.7-44-44-44z"
-      />
-      <ellipse cx="48" cy="58" rx="6" ry="8" fill="#0E0E10" />
-      <ellipse cx="80" cy="58" rx="6" ry="8" fill="#0E0E10" />
-    </svg>
-  );
 }
 
 // ── Button (Unlock) — pressing it injects a real click on Phantom's button ─

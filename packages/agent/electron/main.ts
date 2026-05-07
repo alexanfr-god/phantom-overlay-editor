@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, globalShortcut } from "electron";
+import { app, BrowserWindow, ipcMain, screen } from "electron";
 import { join } from "path";
 import { execFile, exec } from "child_process";
 import { writeFileSync } from "fs";
@@ -486,26 +486,6 @@ app.whenReady().then(async () => {
   }, 500);
 
   console.log("[Agent] Tracking with screen detection");
-
-  // ── Global opacity shortcut ───────────────────────────────────────────────
-  // Cmd+Opt+O cycles overlay opacity through 1.0 → 0.6 → 0.3 → 0.1 so the
-  // tester can see Phantom's native UI through the mask while debugging.
-  // Forwards as overlay:opacity ws-message into the renderer, same path as
-  // the desktop admin's slider.
-  const OPACITY_CYCLE = [1, 0.6, 0.3, 0.1];
-  let opacityIdx = 0;
-  const opacityShortcut = "CommandOrControl+Alt+O";
-  const registered = globalShortcut.register(opacityShortcut, () => {
-    opacityIdx = (opacityIdx + 1) % OPACITY_CYCLE.length;
-    const value = OPACITY_CYCLE[opacityIdx];
-    overlayWin?.webContents.send("ws-message", { type: "overlay:opacity", value });
-    console.log(`[Agent] Opacity shortcut → ${value}`);
-  });
-  if (!registered) console.warn(`[Agent] Failed to register ${opacityShortcut}`);
-});
-
-app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
 });
 
 async function tick() {
