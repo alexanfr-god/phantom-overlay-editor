@@ -167,6 +167,7 @@ struct WinMatch {
 }
 
 var candidates: [WinMatch] = []
+let listMode = mode == "list"
 
 for w in wins {
   let owner = w["kCGWindowOwnerName"] as? String ?? ""
@@ -179,6 +180,14 @@ for w in wins {
   let x  = b["X"] as? CGFloat ?? 0
   let y  = b["Y"] as? CGFloat ?? 0
   let layer = w["kCGWindowLayer"] as? Int ?? 0
+  let wn = w["kCGWindowNumber"] as? Int ?? 0
+  let pid = w["kCGWindowOwnerPID"] as? Int ?? 0
+
+  // ── list mode: dump every Chrome window for diagnostics, no filters ──
+  if listMode {
+    print("layer=\\(layer) wn=\\(wn) pid=\\(pid) size=\\(Int(wd))x\\(Int(ht)) at \\(Int(x)),\\(Int(y)) owner=\\"\\(owner)\\" name=\\"\\(name)\\"")
+    continue
+  }
 
   guard layer == 0 && wd >= 200 && wd <= 500 && ht >= 300 && ht <= 700 else { continue }
 
@@ -186,8 +195,6 @@ for w in wins {
   if BLOCKED.contains(where: { lower.contains($0) }) { continue }
 
   let isPhantom = lower.contains("phantom") || name.contains("bfnaelmomeimhlpmgjnjophhpkkoljpa")
-  let wn = w["kCGWindowNumber"] as? Int ?? 0
-  let pid = w["kCGWindowOwnerPID"] as? Int ?? 0
   candidates.append(WinMatch(
     x: Int(x), y: Int(y), w: Int(wd), h: Int(ht),
     layer: layer, name: name,
@@ -197,12 +204,22 @@ for w in wins {
   ))
 }
 
+if listMode { exit(0) }
+
 candidates.sort { $0.priority < $1.priority }
-// Only return a window when we've confirmed it's actually Phantom — the
-// previous fallback (any small Chrome window) caused the overlay to stick
-// around after the popup closed, attaching itself to whatever popup or
-// developer-tools window happened to match the size filter.
-guard let phantom = candidates.first, phantom.priority == 0 else { exit(0) }
+
+// Log every candidate to stderr so the agent log shows what was matched.
+// Helps diagnose why Phantom popup is or isn't being detected.
+for c in candidates {
+  fputs("[Swift] cand pri=\\(c.priority) wn=\\(c.windowNumber) pid=\\(c.pid) \\(c.w)x\\(c.h) name=\\"\\(c.name)\\"\\n", stderr)
+}
+
+// Permissive: take the first candidate after sort (Phantom-named first if
+// any). The strict "priority==0 only" rule broke real Phantom popups whose
+// kCGWindowName doesn't contain "phantom" (Chrome often hides popup names).
+// Diagnostic stderr lines above let us tighten this once we know what
+// Phantom popups actually look like in the window list.
+guard let phantom = candidates.first else { exit(0) }
 
 // Fast mode: just output bounds + pid
 if !detectMode {
