@@ -407,6 +407,14 @@ function createOverlayWindow() {
   overlayWin.setAlwaysOnTop(true, "floating");
   overlayWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
+  // Forward overlay renderer console messages into the main agent log so
+  // diagnostics (e.g. layout:push element dump) show up in /tmp/agent.log
+  // without the user having to open Electron DevTools.
+  overlayWin.webContents.on("console-message", (_e, level, message) => {
+    const tag = level === 2 ? "WARN" : level === 3 ? "ERROR" : "LOG";
+    console.log(`[Overlay-${tag}] ${message}`);
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
     overlayWin.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {

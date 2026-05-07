@@ -63,6 +63,17 @@ export function AgentOverlay(): React.ReactElement | null {
         switch (msg.type) {
           case "layout:push": {
             const layout = msg.payload as LayoutDocument;
+            // Diagnostic: print every element so the agent log shows exactly
+            // what was broadcast (type / anchor / content). Lets us verify
+            // whether Lovable actually shipped the new wccToLayoutDocument.
+            console.log(
+              `[Overlay] layout:push received — ${layout.elements.length} elements:`,
+              layout.elements.map((el) => ({
+                anchor: (el as any).anchor ?? (el as any).label,
+                type: el.type,
+                content: el.content,
+              })),
+            );
             return {
               ...s,
               layout,
@@ -180,7 +191,10 @@ function OverlayEl({ el, cw, ch }: OverlayElProps): React.ReactElement {
     display: "flex",
     alignItems: "center",
     justifyContent: el.type === "input" ? "flex-start" : "center",
-    overflow: "hidden",
+    // Image elements need overflow:visible so theme drop-shadow halos can
+    // extend beyond the bounding box (otherwise the glow gets clipped at
+    // the edges of the 140×150 logo area).
+    overflow: el.type === "image" ? "visible" : "hidden",
 
     // Interactive elements (input + unlock) capture clicks; everything else
     // is decorative and lets clicks pass through to Phantom (assuming main
@@ -242,10 +256,10 @@ function ElContent({ el, anchorId }: { el: LayoutElement; anchorId: string }): R
       );
 
     case "image":
-      // If the layout-doc supplied a logo URL, render it directly (future
-      // AI-generated per-theme logos land here). Otherwise we mirror the
-      // Lovable mockup's DynamicPhantomRenderer fallback — same SVG path so
-      // overlay and mockup are visually identical.
+      // Render the asset (typically the base64 Phantom ghost SVG from
+      // wccToLayoutDocument). Theme `filter` from el.styles is applied
+      // directly here so the drop-shadow glow halos the image. Animation
+      // (e.g. pulse/aurora) likewise comes through el.styles.animation.
       if (el.content.src) {
         return (
           <img
@@ -254,18 +268,20 @@ function ElContent({ el, anchorId }: { el: LayoutElement; anchorId: string }): R
             style={{
               width: "100%",
               height: "100%",
-              objectFit: (el.styles.objectFit as React.CSSProperties["objectFit"]) ?? "cover",
+              objectFit: (el.styles.objectFit as React.CSSProperties["objectFit"]) ?? "contain",
               borderRadius: "inherit",
               pointerEvents: "none",
+              filter: el.styles.filter ?? undefined,
+              animation: el.styles.animation ?? undefined,
             }}
           />
         );
       }
-      // Default Phantom-style ghost. fill comes from theme accent (el.styles.color).
-      // textShadow → drop-shadow filter so the themed glow applies to the SVG too.
+      // Defensive fallback: minimal ghost shape if for some reason no src
+      // came through. Should rarely fire in practice.
       return (
         <PhantomGhostFallback
-          fill={(el.styles.color as string) ?? "#ab9ff2"}
+          fill={(el.styles.color as string) ?? "#FFFDF8"}
           textShadow={(el.styles.textShadow as string) ?? ""}
         />
       );
