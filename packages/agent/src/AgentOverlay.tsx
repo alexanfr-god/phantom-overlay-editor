@@ -63,17 +63,16 @@ export function AgentOverlay(): React.ReactElement | null {
         switch (msg.type) {
           case "layout:push": {
             const layout = msg.payload as LayoutDocument;
-            // Diagnostic: print every element so the agent log shows exactly
-            // what was broadcast (type / anchor / content). Lets us verify
-            // whether Lovable actually shipped the new wccToLayoutDocument.
-            console.log(
-              `[Overlay] layout:push received — ${layout.elements.length} elements:`,
-              layout.elements.map((el) => ({
-                anchor: (el as any).anchor ?? (el as any).label,
-                type: el.type,
-                content: el.content,
-              })),
-            );
+            // Diagnostic: dump the layout as JSON so the agent log captures
+            // exactly what's broadcast. Lets us verify whether Lovable
+            // actually shipped the new wccToLayoutDocument (logo with src,
+            // input/unlock content, etc.).
+            const dump = layout.elements.map((el) => ({
+              anchor: (el as any).anchor ?? (el as any).label,
+              type: el.type,
+              content: el.content,
+            }));
+            console.log(`[Overlay] layout:push received — ${layout.elements.length} elements: ${JSON.stringify(dump)}`);
             return {
               ...s,
               layout,
