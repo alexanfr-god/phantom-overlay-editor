@@ -501,65 +501,37 @@ async function tick() {
   if (Date.now() < unlockCooldownUntil) return;
 
   const overlayVisible = overlayWin?.isVisible() ?? false;
+  const result = await findPhantom(false);
 
   if (overlayVisible) {
-    // ── Overlay is shown: fast position check every tick ────────────────────
-    const result = await findPhantom(false);
     if (result) {
       missCount = 0;
       applyBounds(result);
     } else {
       missCount++;
-      // Require 6 consecutive misses (~3s) before hiding — avoids false negatives
       if (missCount >= 6) {
         forceHide();
         missCount = 0;
         console.log("[Agent] Phantom gone — overlay hidden");
       }
     }
-
-    // ── Periodic screen check every 10 ticks (~5s) ──────────────────────────
-    // detectScreen() captures only the Phantom window by CGWindowID so our
-    // overlay is never included — no flicker, no hide/show required.
-    if (tickCount % 10 === 0) {
-      const check = await detectScreen();
-      if (check?.screen && check.screen !== "unknown" && check.screen !== targetScreen) {
-        screenMissCount++;
-        if (screenMissCount >= 2) {  // 2 consecutive wrong-screen detections → hide
-          forceHide();
-          screenMissCount = 0;
-          console.log(`[Agent] Screen changed to "${check.screen}" (target="${targetScreen}") — overlay hidden`);
-        }
-      } else {
-        screenMissCount = 0;
-      }
-    }
     return;
   }
 
-  // ── Overlay hidden — run detect to decide if we should show ─────────────
-  const result = await detectScreen();
+  // Overlay hidden: show whenever Phantom is detected AND we're inside the
+  // freshness window (layout:push refreshes for 10s; captive-extend bumps it
+  // forward on each keystroke / focus so active typing keeps the overlay
+  // alive). We dropped the per-tick pixel-sample screen detection — its
+  // RGB threshold was misfiring on Phantom's current dark password screen
+  // and forcing overlay show/hide every ~5s, which broke typing and clicks.
   if (!result) {
     missCount++;
     return;
   }
   missCount = 0;
 
-  // Show overlay on password screen OR any time we can't determine screen.
-  // Also show immediately after receiving a new layout:push (layoutFreshUntil).
-  const isFresh = Date.now() < layoutFreshUntil;
-  if (result.screen === targetScreen || result.screen === "unknown" || isFresh) {
-    screenMissCount = 0;
+  if (Date.now() < layoutFreshUntil) {
     applyBounds(result);
-    if (isFresh) {
-      console.log(`[Agent] ✓ Fresh layout — overlay shown on screen="${result.screen}"`);
-    } else {
-      console.log(`[Agent] ✓ Screen matches "${targetScreen}" — overlay shown`);
-    }
-  } else {
-    if (tickCount % 25 === 0) {
-      console.log(`[Agent] Screen "${result.screen}" ≠ target "${targetScreen}" — waiting`);
-    }
   }
 }
 
@@ -605,8 +577,10 @@ ipcMain.handle("hide-overlay", () => {
 ipcMain.handle("inject-text", async (_ev, text: string) => {
   try {
     await injectText(text);
+    console.log(`[Agent] inject-text "${text.replace(/./g, "•")}" (${text.length} chars, pid=${phantomPid})`);
     return { ok: true };
   } catch (e) {
+    console.warn(`[Agent] inject-text failed: ${(e as Error).message}`);
     return { ok: false, error: (e as Error).message };
   }
 });
@@ -614,8 +588,10 @@ ipcMain.handle("inject-text", async (_ev, text: string) => {
 ipcMain.handle("inject-key", async (_ev, name: string) => {
   try {
     await injectKey(name);
+    console.log(`[Agent] inject-key "${name}" (pid=${phantomPid})`);
     return { ok: true };
   } catch (e) {
+    console.warn(`[Agent] inject-key failed: ${(e as Error).message}`);
     return { ok: false, error: (e as Error).message };
   }
 });
@@ -644,13 +620,24 @@ ipcMain.handle("inject-click", async (_ev, xPct: number, yPct: number) => {
 
   try {
     await injectClickAbs(ax, ay);
+    console.log(`[Agent] inject-click @ ${Math.round(ax)},${Math.round(ay)} (pid=${phantomPid})`);
+    // Successfully fired a click — that was almost certainly Unlock. Schedule
+    // auto-hide so the overlay doesn't sit over Phantom's wallet home screen
+    // after a successful unlock. The 2s cooldown then suppresses immediate
+    // re-show if Phantom is still detected at the same coords.
+    setTimeout(() => {
+      if (overlayWin?.isVisible()) {
+        forceHide();
+        unlockCooldownUntil = Date.now() + 2000;
+        layoutFreshUntil = 0;
+        console.log("[Agent] Auto-hide after inject-click (assumed unlock)");
+      }
+    }, 1500);
     return { ok: true };
   } catch (e) {
+    console.warn(`[Agent] inject-click failed: ${(e as Error).message}`);
     return { ok: false, error: (e as Error).message };
   } finally {
-    // The cursor poller (80ms interval) will re-enable captive mode if the
-    // user's cursor is still over an interactive region. Push the grace
-    // window forward so a stray cursor jump doesn't immediately re-flip it.
     captiveHoldUntil = Date.now() + 200;
   }
 });
@@ -723,7 +710,10 @@ ipcMain.handle("set-captive-regions", (_ev, regions: CaptivePctRegion[]) => {
 });
 
 // Renderer signals it's actively typing — extend captive grace window so
-// the overlay can't flip back to pass-through mid-keystroke.
+// the overlay can't flip back to pass-through mid-keystroke, AND extend
+// the overlay-show freshness window so tick() doesn't hide the overlay
+// in the middle of a password entry.
 ipcMain.handle("captive-extend", () => {
   captiveHoldUntil = Date.now() + 1500;
+  layoutFreshUntil = Math.max(layoutFreshUntil, Date.now() + 30_000);
 });
